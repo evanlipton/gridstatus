@@ -4,8 +4,9 @@ import pandas as pd
 import requests
 
 from gridstatus import utils
-from gridstatus.base import FuelMix, ISOBase, Markets, NotSupported
+from gridstatus.base import ISOBase, Markets, NotSupported
 from gridstatus.lmp_config import lmp_config
+from gridstatus.logging import log
 
 
 class MISO(ISOBase):
@@ -21,7 +22,7 @@ class MISO(ISOBase):
     iso_id = "miso"
     # miso spans multiple timezones, so picking central
     # all parsing is done in EST since that is what api returns
-    default_timezone = "US/Central"
+    default_timezone = "US/Eastern"
 
     markets = [Markets.REAL_TIME_5_MIN, Markets.DAY_AHEAD_HOURLY]
 
@@ -65,10 +66,10 @@ class MISO(ISOBase):
                 amount = 0
             mix[fuel["CATEGORY"]] = amount
 
-        # print(r["TotalMW"])  # todo - this total does add up to each part
-
-        fm = FuelMix(time=time, mix=mix, iso=self.name)
-        return fm
+        df = pd.DataFrame(mix, index=[time])
+        df.index.name = "Time"
+        df = df.reset_index()
+        return df
 
     def get_load(self, date, verbose=False):
         if date == "latest":
@@ -99,7 +100,7 @@ class MISO(ISOBase):
             raise NotSupported
 
     def get_load_forecast(self, date, verbose=False):
-        if date != "today":
+        if not utils.is_today(date, self.default_timezone):
             raise NotSupported()
 
         r = self._get_load_and_forecast_data(verbose=verbose)
@@ -213,8 +214,8 @@ class MISO(ISOBase):
         """
         url = "https://www.misoenergy.org/api/giqueue/getprojects"
 
-        if verbose:
-            print("Downloading interconnection queue from {}".format(url))
+        msg = f"Downloading interconnection queue from {url}"
+        log(msg, verbose)
 
         json_str = requests.get(url).text
         data = json.loads(json_str)

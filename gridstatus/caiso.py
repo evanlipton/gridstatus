@@ -8,9 +8,10 @@ import requests
 import tabula
 
 from gridstatus import utils
-from gridstatus.base import FuelMix, GridStatus, ISOBase, Markets, NotSupported
+from gridstatus.base import GridStatus, ISOBase, Markets, NotSupported
 from gridstatus.decorators import support_date_range
 from gridstatus.lmp_config import lmp_config
+from gridstatus.logging import log
 
 _BASE = "https://www.caiso.com/outlook/SP"
 _HISTORY_BASE = "https://www.caiso.com/outlook/SP/History"
@@ -91,16 +92,12 @@ class CAISO(ISOBase):
         """
         if date == "latest":
             mix = self.get_fuel_mix("today", verbose=verbose)
-            latest = mix.iloc[-1]
-            time = latest.pop("Time")
-            mix_dict = latest.to_dict()
-            return FuelMix(time=time, mix=mix_dict, iso=self.name)
+            return mix.tail(1).reset_index(drop=True)
 
         return self._get_historical_fuel_mix(date, verbose=verbose)
 
     def _get_historical_fuel_mix(self, date, verbose=False):
-        url = _HISTORY_BASE + "/%s/fuelsource.csv"
-        df = _get_historical(url, date, verbose=verbose)
+        df = _get_historical("fuelsource", date, verbose=verbose)
 
         # rename some inconsistent columns names to standardize across dates
         df = df.rename(
@@ -136,8 +133,8 @@ class CAISO(ISOBase):
         return self._get_historical_load(date, verbose=verbose)
 
     def _get_historical_load(self, date, verbose=False):
-        url = _HISTORY_BASE + "/%s/demand.csv"
-        df = _get_historical(url, date, verbose=verbose)
+        df = _get_historical("demand", date, verbose=verbose)
+
         df = df[["Time", "Current demand"]]
         df = df.rename(columns={"Current demand": "Load"})
         df = df.dropna(subset=["Load"])
@@ -334,8 +331,8 @@ class CAISO(ISOBase):
         if date == "latest":
             return self._latest_from_today(self.get_storage)
 
-        url = _HISTORY_BASE + "/%s/storage.csv"
-        df = _get_historical(url, date, verbose=verbose)
+        df = _get_historical("storage", date, verbose=verbose)
+
         df = df.rename(
             columns={
                 "Total batteries": "Supply",
@@ -444,8 +441,8 @@ class CAISO(ISOBase):
     def get_interconnection_queue(self, verbose=False):
         url = "http://www.caiso.com/PublishedDocuments/PublicQueueReport.xlsx"
 
-        if verbose:
-            print("Downloading interconnection queue from {}".format(url))
+        msg = f"Downloading interconnection queue from {url}"
+        log(msg, verbose)
 
         sheets = pd.read_excel(url, skiprows=3, sheet_name=None)
 
@@ -587,10 +584,12 @@ class CAISO(ISOBase):
 
         pdf = None
         for date_str in date_strs:
-            f = f"http://www.caiso.com/Documents/Wind_SolarReal-TimeDispatchCurtailmentReport{date_str}.pdf"  # noqa
-            if verbose:
-                print("Fetching URL: ", f)
-            r = requests.get(f)
+            url = f"http://www.caiso.com/Documents/Wind_SolarReal-TimeDispatchCurtailmentReport{date_str}.pdf"  # noqa: E501
+
+            msg = f"Fetching URL: {url}"
+            log(msg, verbose)
+
+            r = requests.get(url)
             if b"404 - Page Not Found" in r.content:
                 continue
             pdf = io.BytesIO(r.content)
@@ -810,13 +809,18 @@ def _make_timestamp(time_str, today, timezone="US/Pacific"):
     )
 
 
-def _get_historical(url, date, verbose=False):
-    date_str = date.strftime("%Y%m%d")
-    date_obj = date
-    url = url % date_str
-
-    if verbose:
-        print("Fetching URL: ", url)
+def _get_historical(file, date, verbose=False):
+    try:
+        date_str = date.strftime("%Y%m%d")
+        url = _HISTORY_BASE + "/%s/%s.csv" % (date_str, file)
+        msg = f"Fetching URL: {url}"
+        log(msg, verbose)
+    except Exception:
+        # fallback if today and no historical file yet
+        if utils.is_today(date, CAISO.default_timezone):
+            url = _BASE + "/%s.csv" % file
+            msg = f"Fetching URL: {url}"
+            log(msg, verbose)
 
     df = pd.read_csv(url)
 
@@ -825,7 +829,7 @@ def _get_historical(url, date, verbose=False):
 
     df["Time"] = df["Time"].apply(
         _make_timestamp,
-        today=date_obj,
+        today=date,
         timezone="US/Pacific",
     )
 
@@ -838,8 +842,9 @@ def _get_historical(url, date, verbose=False):
 
 
 def _get_oasis(url, usecols=None, verbose=False, sleep=4):
-    if verbose:
-        print(url)
+
+    msg = f"Fetching URL: {url}"
+    log(msg, verbose)
 
     retry_num = 0
     while retry_num < 3:

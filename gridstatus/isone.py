@@ -1,13 +1,11 @@
 import io
 import math
-import sys
 
 import pandas as pd
 import requests
 
 from gridstatus import utils
 from gridstatus.base import (
-    FuelMix,
     GridStatus,
     InterconnectionQueueStatus,
     ISOBase,
@@ -16,6 +14,7 @@ from gridstatus.base import (
 )
 from gridstatus.decorators import support_date_range
 from gridstatus.lmp_config import lmp_config
+from gridstatus.logging import log
 
 
 class ISONE(ISOBase):
@@ -96,9 +95,10 @@ class ISONE(ISOBase):
         )
 
         # todo has marginal flag
-        mix_dict = mix_df.set_index("FuelCategory")["GenMw"].to_dict()
-
-        return FuelMix(time, mix_dict, self.name)
+        mix_df = mix_df.set_index("FuelCategory")[["GenMw"]].T.reset_index(drop=True)
+        mix_df.insert(0, "Time", time)
+        mix_df.columns.name = None
+        return mix_df
 
     @support_date_range(frequency="1D")
     def get_fuel_mix(self, date, end=None, verbose=False):
@@ -419,10 +419,9 @@ class ISONE(ISOBase):
         data.rename(columns=rename, inplace=True)
 
         data["Market"] = market.value
-
-        location_groupby = (
-            "Location Id" if "Location Id" in data.columns else "Location"
-        )
+        # Location seems to be more unique than Location ID refer to #171
+        location_groupby = "Location" if "Location" in data.columns else "Location Id"
+        # groupby location so that hours are increasing monotonically and can infer dst
         data["Time"] = data.groupby(location_groupby)["Time"].transform(
             lambda x, timezone=timezone: pd.to_datetime(x).dt.tz_localize(
                 timezone,
@@ -483,8 +482,10 @@ class ISONE(ISOBase):
         """  # noqa
 
         # determine report date from homepage
-        if verbose:
-            print("Loading queue", self.interconnection_homepage)
+
+        msg = f"Loading queue {self.interconnection_homepage}"
+        log(msg, verbose)
+
         r = requests.get("https://irtt.iso-ne.com/reports/external")
         queue = pd.read_html(r.text, attrs={"id": "publicqueue"})[0]
 
@@ -565,17 +566,17 @@ class ISONE(ISOBase):
 
 
 def _make_request(url, skiprows, verbose):
-    with requests.Session() as s:
-        # make first get request to get cookies set
-        s.get(
-            "https://www.iso-ne.com/isoexpress/web/reports/operations/-/tree/gen-fuel-mix",
-        )
+    attempt = 0
+    while attempt < 3:
+        with requests.Session() as s:
+            # make first get request to get cookies set
+            s.get(
+                "https://www.iso-ne.com/isoexpress/web/reports/operations/-/tree/gen-fuel-mix",
+            )
 
-        # in testing, never takes more than 2 attempts
-        attempt = 0
-        while attempt < 3:
-            if verbose:
-                print(f"Loading data from {url}", file=sys.stderr)
+            # in testing, never takes more than 2 attempts
+            msg = f"Loading data from {url}"
+            log(msg, verbose)
 
             response = s.get(url)
             content_type = response.headers["Content-Type"]
@@ -583,28 +584,31 @@ def _make_request(url, skiprows, verbose):
             if response.status_code == 200 and content_type == "text/csv":
                 break
 
-            print(f"Attempt {attempt+1} failed. Retrying...", file=sys.stderr)
+            print(
+                f"Attempt {attempt+1} failed. Retrying...",
+            )
             attempt += 1
 
-        if response.status_code != 200 or content_type != "text/csv":
-            raise RuntimeError(
-                f"Failed to get data from {url}. Check if ISONE is down and \
-                    try again later",
-            )
-
-        df = pd.read_csv(
-            io.StringIO(response.content.decode("utf8")),
-            skiprows=skiprows,
-            skipfooter=1,
-            engine="python",
+    if response.status_code != 200 or content_type != "text/csv":
+        raise RuntimeError(
+            f"Failed to get data from {url}. Check if ISONE is down and \
+                try again later",
         )
-        return df
+
+    df = pd.read_csv(
+        io.StringIO(response.content.decode("utf8")),
+        skiprows=skiprows,
+        skipfooter=1,
+        engine="python",
+    ).drop_duplicates()
+    return df
 
 
 def _make_wsclient_request(url, data, verbose=False):
     """Make request to ISO NE wsclient"""
-    if verbose:
-        print("Requesting data from {}".format(url))
+
+    msg = f"Requesting data from {url}"
+    log(msg, verbose)
 
     r = requests.post(
         "https://www.iso-ne.com/ws/wsclient",

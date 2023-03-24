@@ -7,13 +7,14 @@ import requests
 import tqdm
 
 from gridstatus import utils
-from gridstatus.base import FuelMix, ISOBase, Markets, NotSupported
+from gridstatus.base import ISOBase, Markets, NotSupported
 from gridstatus.decorators import (
     _get_pjm_archive_date,
     pjm_update_dates,
     support_date_range,
 )
 from gridstatus.lmp_config import lmp_config
+from gridstatus.logging import log
 
 
 class PJM(ISOBase):
@@ -55,6 +56,32 @@ class PJM(ISOBase):
         "51287",
     ]
 
+    zone_node_ids = [
+        "1",
+        "3",
+        "51291",
+        "51292",
+        "51293",
+        "51295",
+        "51296",
+        "51297",
+        "51298",
+        "51299",
+        "51300",
+        "51301",
+        "7633629",
+        "8394954",
+        "8445784",
+        "33092371",
+        "34508503",
+        "34964545",
+        "37737283",
+        "116013753",
+        "124076095",
+        "970242670",
+        "1709725933",
+    ]
+
     markets = [
         Markets.REAL_TIME_5_MIN,
         Markets.REAL_TIME_HOURLY,
@@ -67,10 +94,7 @@ class PJM(ISOBase):
 
         if date == "latest":
             mix = self.get_fuel_mix("today")
-            latest = mix.iloc[-1]
-            time = latest.pop("Time")
-            mix_dict = latest.to_dict()
-            return FuelMix(time=time, mix=mix_dict, iso=self.name)
+            return mix.tail(1).reset_index(drop=True)
 
         # earliest date available appears to be 1/1/2016
         data = {
@@ -92,6 +116,8 @@ class PJM(ISOBase):
             values="mw",
             aggfunc="first",
         ).reset_index()
+
+        mix_df.columns.name = None
 
         return mix_df
 
@@ -160,7 +186,7 @@ class PJM(ISOBase):
 
         """
 
-        if date != "today":
+        if not utils.is_today(date, self.default_timezone):
             raise NotSupported()
 
         # todo: should we use the UTC field instead of EPT?
@@ -446,10 +472,8 @@ class PJM(ISOBase):
                 start.strftime("%m/%d/%Y %H:%M") + "to" + end.strftime("%m/%d/%Y %H:%M")
             )
 
-        if verbose:
-            print(
-                f"Retrieving data from {endpoint} with params {final_params}",
-            )
+        msg = f"Retrieving data from {endpoint} with params {final_params}"
+        log(msg, verbose)
 
         api_key = self._get_key()
         r = self._get_json(
